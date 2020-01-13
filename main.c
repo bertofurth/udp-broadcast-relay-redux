@@ -27,6 +27,7 @@ GNU General Public License for more details.
 #define UDPHEADER_LEN 8
 #define HEADER_LEN (IPHEADER_LEN + UDPHEADER_LEN)
 #define TTL_ID_OFFSET 64
+#define SIGF_TERM 0x1
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -47,6 +48,13 @@ GNU General Public License for more details.
 #include <sys/ioctl.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <signal.h>
+
+
+
+static int exit_ok = 0;
+static sig_atomic_t sig_flags = 0;
+static char g_pidfile[128];
 
 /* list of addresses and interface numbers on local machine */
 struct Iface {
@@ -75,11 +83,31 @@ void inet_ntoa2(struct in_addr in, char* chr, int len) {
     strncpy(chr, from, len);
 }
 
+void sig_term_handler(int signum, siginfo_t *info, void *ptr)
+{
+    unlink(g_pidfile);
+    exit(0);
+}
+
+void catch_sigterm()
+{
+    static struct sigaction _sigact;
+
+    memset(&_sigact, 0, sizeof(_sigact));
+    _sigact.sa_sigaction = sig_term_handler;
+    _sigact.sa_flags = SA_SIGINFO;
+
+    sigaction(SIGTERM, &_sigact, NULL);
+}
+
+
 int main(int argc,char **argv) {
     /* Debugging, forking, other settings */
-    int debug = 0, forking = 0;
+    FILE *pidfp;
+    int debug = 0, forking = 0, pid;
     u_int16_t port = 0;
     u_char id = 0;
+    char *usr_pid = 0;
     char* multicastAddrs[MAXMULTICAST];
     int multicastAddrsNum = 0;
     char* interfaceNames[MAXIFS];
@@ -99,9 +127,17 @@ int main(int argc,char **argv) {
     rcv_msg.msg_iovlen = 1;
     rcv_msg.msg_control = pkt_infos;
     rcv_msg.msg_controllen = sizeof(pkt_infos);
+    static char pidfile[128];
+   
+    int child_pid;
+#ifndef HAVE_ARC4RANDOM
+srandom(time(NULL) & getpid());
+#endif
+
+
 
     if(argc < 2) {
-        fprintf(stderr,"usage: %s [-d] [-f] [-s IP] [--id id] [--port udp-port] [--dev dev1]... [--multicast ip]...\n\n",*argv);
+        fprintf(stderr,"usage: %s [-d] [-f] [-p] [-s IP] [--id id] [--port udp-port] [--dev dev1]... [--multicast ip]... -pid\n\n",*argv);
         fprintf(stderr,"This program listens for broadcast  packets  on the  specified UDP port\n"
             "and then forwards them to each other given interface.  Packets are sent\n"
             "such that they appear to have come from the original broadcaster, resp.\n"
@@ -160,6 +196,10 @@ int main(int argc,char **argv) {
             interfaceNames[interfaceNamesNum] = argv[i];
             interfaceNamesNum++;
         }
+        else if (strcmp(argv[i],"--pid") == 0) {
+            i++;
+            usr_pid = argv[i];            
+        }
         else if (strcmp(argv[i],"--multicast") == 0) {
             i++;
             multicastAddrs[multicastAddrsNum] = argv[i];
@@ -184,6 +224,9 @@ int main(int argc,char **argv) {
         exit(1);
     }
 
+
+	
+    
     u_char ttl = id+TTL_ID_OFFSET;
 
     DPRINT ("ID: %i (ttl: %i), Port %i\n",id,ttl,port);
@@ -196,6 +239,7 @@ int main(int argc,char **argv) {
         fprintf(stderr,"You must be root to create a raw socket\n");
           exit(1);
       };
+
 
     /* For each interface on the command line */
     int maxifs = 0;
@@ -415,19 +459,36 @@ int main(int argc,char **argv) {
         }
     }
 
-    DPRINT("Done Initializing\n\n");
 
+    DPRINT("Done Initializing\n\n");
+    sprintf(pidfile,"/var/run/udpbcastrelay_%d.pid",id);
+    if ((pidfp = fopen(pidfile, "w")) != NULL) {                 
+    fprintf(pidfp, "%d\n", child_pid);
+    fclose(pidfp);
+    strcpy(g_pidfile,pidfile);
+    }     
     /* Fork to background */
     if (! debug) {
-        if (forking && fork())
+        if (forking && (child_pid=fork())) {
+            sprintf(pidfile,"/var/run/udpbcastrelay_%d.pid",id);
+            if ((pidfp = fopen(pidfile, "w")) != NULL) {                 
+            fprintf(pidfp, "%d\n", child_pid);
+            fclose(pidfp);
+            strcpy(g_pidfile,pidfile);
+            }
+        
         exit(0);
         fclose(stdin);
         fclose(stdout);
         fclose(stderr);
+        }
     }
+    
 
     for (;;) /* endless loop */
     {
+        
+        catch_sigterm();
         /* Receive a broadcast packet */
         int len = recvmsg(rcv,&rcv_msg,0);
         if (len <= 0) continue;    /* ignore broken packets */

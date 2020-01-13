@@ -1,5 +1,5 @@
 udp-broadcast-relay-redux: main.c
-	gcc -g main.c -o udp-broadcast-relay-redux
+	gcc -g main.c -o udpbroadcastrelay
 
 clean:
-	rm -f udp-broadcast-relay-redux
+	rm -f udpbroadcastrelay
